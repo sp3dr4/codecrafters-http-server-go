@@ -12,8 +12,6 @@ import (
 var logger = log.New(os.Stdout, "> ", log.Ldate|log.Ltime|log.Lmicroseconds)
 
 func main() {
-	logger.Println("Logs from your program will appear here!")
-
 	l, err := net.Listen("tcp", "0.0.0.0:4221")
 	if err != nil {
 		logger.Println("Failed to bind to port 4221")
@@ -61,9 +59,14 @@ func handleRequest(line []string) (string, error) {
 	if len(line) != 3 {
 		return "", fmt.Errorf("expected 3 parts in request line, got %v", line)
 	}
-	resp := "HTTP/1.1 200 OK\r\n\r\n"
-	if line[1] != "/" {
-		resp = "HTTP/1.1 404 Not Found\r\n\r\n"
+
+	resp := "HTTP/1.1 404 Not Found\r\n\r\n"
+
+	if strings.HasPrefix(line[1], "/echo/") {
+		toEcho := strings.Split(line[1][1:], "/")[1]
+		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
+	} else if line[1] == "/" {
+		resp = "HTTP/1.1 200 OK\r\n\r\n"
 	}
 
 	return resp, nil
