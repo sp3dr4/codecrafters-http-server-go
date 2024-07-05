@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -25,14 +26,13 @@ func main() {
 	}
 
 	reader := bufio.NewReader(conn)
-	reqLine, err := parseRequest(reader)
+	req, err := parseRequest(reader)
 	if err != nil {
 		logger.Println("Error parsing request: ", err.Error())
 		os.Exit(1)
 	}
-	logger.Printf("request line: %v\n", reqLine)
 
-	resp, err := handleRequest(reqLine)
+	resp, err := handleRequest(req)
 	if err != nil {
 		logger.Println("Error handling request: ", err.Error())
 		os.Exit(1)
@@ -44,18 +44,44 @@ func main() {
 	}
 }
 
-func parseRequest(r *bufio.Reader) ([]string, error) {
-	line, err := r.ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-
-	parts := strings.Fields(line)
-
-	return parts, nil
+type request struct {
+	reqLine []string
+	headers []string
 }
 
-func handleRequest(line []string) (string, error) {
+func parseRequest(r *bufio.Reader) (request, error) {
+	buf := make([]byte, 1024)
+	_, err := r.Read(buf)
+	if err != nil {
+		return request{}, err
+	}
+	// logger.Printf("n: %d\n", n)
+
+	raw := string(buf)
+	lines := strings.Split(raw, "\n")
+
+	req := request{
+		reqLine: strings.Fields(lines[0]),
+		headers: []string{},
+	}
+
+	i := 1
+	for {
+		ln := strings.TrimSpace(lines[i])
+		if ln == "" {
+			break
+		}
+		req.headers = append(req.headers, ln)
+		i++
+	}
+
+	return req, nil
+}
+
+func handleRequest(req request) (string, error) {
+	logger.Println("handling request: ", req)
+
+	line := req.reqLine
 	if len(line) != 3 {
 		return "", fmt.Errorf("expected 3 parts in request line, got %v", line)
 	}
@@ -65,6 +91,13 @@ func handleRequest(line []string) (string, error) {
 	if strings.HasPrefix(line[1], "/echo/") {
 		toEcho := strings.Split(line[1][1:], "/")[1]
 		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
+	} else if line[1] == "/user-agent" {
+		agentIx := slices.IndexFunc(req.headers, func(h string) bool { return strings.HasPrefix(strings.ToLower(h), "user-agent: ") })
+		if agentIx == -1 {
+			return "", fmt.Errorf("user-agent header not found")
+		}
+		agent := strings.Split(req.headers[agentIx], ": ")[1]
+		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(agent), agent)
 	} else if line[1] == "/" {
 		resp = "HTTP/1.1 200 OK\r\n\r\n"
 	}
