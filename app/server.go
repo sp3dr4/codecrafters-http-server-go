@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -17,7 +21,20 @@ type request struct {
 	headers []string
 }
 
+type service struct {
+	directory string
+}
+
+var svc service
+
 func main() {
+	filedir := flag.String("directory", "/", "Filesystem directory where to search files to serve")
+	flag.Parse()
+
+	svc = service{
+		directory: *filedir,
+	}
+
 	l, err := net.Listen("tcp", "0.0.0.0:4221")
 	if err != nil {
 		logger.Println("Failed to bind to port 4221")
@@ -36,6 +53,7 @@ func main() {
 }
 
 func handleConn(c *net.Conn) {
+	defer (*c).Close()
 	reader := bufio.NewReader(*c)
 	req, err := parseRequest(reader)
 	if err != nil {
@@ -71,6 +89,10 @@ func parseRequest(r *bufio.Reader) (request, error) {
 		headers: []string{},
 	}
 
+	if len(req.reqLine) != 3 {
+		return request{}, fmt.Errorf("expected 3 parts in request line, got %v", req.reqLine)
+	}
+
 	i := 1
 	for {
 		ln := strings.TrimSpace(lines[i])
@@ -87,26 +109,70 @@ func parseRequest(r *bufio.Reader) (request, error) {
 func handleRequest(req request) (string, error) {
 	logger.Println("handling request: ", req)
 
-	line := req.reqLine
-	if len(line) != 3 {
-		return "", fmt.Errorf("expected 3 parts in request line, got %v", line)
+	routes := []struct {
+		pattern string
+		handler func(request) (string, error)
+	}{
+		{`^\/files\/\S+$`, svc.getfile},
+		{`^\/echo\/\S+$`, svc.echo},
+		{`^\/user-agent$`, svc.useragent},
+		{`^\/$`, svc.root},
 	}
 
-	resp := "HTTP/1.1 404 Not Found\r\n\r\n"
-
-	if strings.HasPrefix(line[1], "/echo/") {
-		toEcho := strings.Split(line[1][1:], "/")[1]
-		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
-	} else if line[1] == "/user-agent" {
-		agentIx := slices.IndexFunc(req.headers, func(h string) bool { return strings.HasPrefix(strings.ToLower(h), "user-agent: ") })
-		if agentIx == -1 {
-			return "", fmt.Errorf("user-agent header not found")
+	resp := ""
+	for _, r := range routes {
+		ok, err := regexp.MatchString(r.pattern, req.reqLine[1])
+		fmt.Printf("%s -> %s -> %t\n", req.reqLine[1], r.pattern, ok)
+		if err != nil {
+			logger.Println("Error matching path to route pattern: ", err.Error())
+			continue
 		}
-		agent := strings.Split(req.headers[agentIx], ": ")[1]
-		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(agent), agent)
-	} else if line[1] == "/" {
-		resp = "HTTP/1.1 200 OK\r\n\r\n"
+		if ok {
+			resp, err = r.handler(req)
+			if err != nil {
+				return "", err
+			}
+			break
+		}
+	}
+
+	if resp == "" {
+		resp = "HTTP/1.1 404 Not Found\r\n\r\n"
 	}
 
 	return resp, nil
+}
+
+func (sv *service) echo(req request) (string, error) {
+	toEcho := strings.Split(req.reqLine[1][1:], "/")[1]
+	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho), nil
+}
+
+func (sv *service) useragent(req request) (string, error) {
+	agentIx := slices.IndexFunc(req.headers, func(h string) bool { return strings.HasPrefix(strings.ToLower(h), "user-agent: ") })
+	if agentIx == -1 {
+		return "", fmt.Errorf("user-agent header not found")
+	}
+	agent := strings.Split(req.headers[agentIx], ": ")[1]
+	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(agent), agent), nil
+}
+
+func (sv *service) root(req request) (string, error) {
+	return "HTTP/1.1 200 OK\r\n\r\n", nil
+}
+
+func (sv *service) getfile(req request) (string, error) {
+	filename := strings.Split(req.reqLine[1][1:], "/")[1]
+
+	dat, err := os.ReadFile(fmt.Sprintf("%s%s", sv.directory, filename))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "HTTP/1.1 404 Not Found\r\n\r\n", nil
+		}
+		logger.Println("Error reading file: ", err.Error())
+		return "", err
+	}
+
+	datStr := string(dat)
+	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(datStr), datStr), nil
 }
