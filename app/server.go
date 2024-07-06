@@ -16,6 +16,12 @@ import (
 
 var logger = log.New(os.Stdout, "> ", log.Ldate|log.Ltime|log.Lmicroseconds)
 
+type service struct {
+	directory string
+}
+
+var svc service
+
 type Header struct {
 	name  string
 	value string
@@ -35,11 +41,25 @@ func (r *Request) GetHeader(name string) (string, bool) {
 	return r.headers[ix].value, true
 }
 
-type service struct {
-	directory string
+type Response struct {
+	statusCode int
+	statusMsg  string
+	headers    []Header
+	body       string
 }
 
-var svc service
+func (rs *Response) Write(conn *net.Conn) error {
+	resp := fmt.Sprintf("HTTP/1.1 %d %s\r\n", rs.statusCode, rs.statusMsg)
+
+	for _, h := range rs.headers {
+		resp += fmt.Sprintf("%s: %s\r\n", h.name, h.value)
+	}
+	resp += "\r\n" // End headers
+	resp += rs.body
+
+	_, err := fmt.Fprint(*conn, resp)
+	return err
+}
 
 func main() {
 	filedir := flag.String("directory", "/", "Filesystem directory where to search files to serve")
@@ -81,7 +101,17 @@ func handleConn(c *net.Conn) {
 		os.Exit(1)
 	}
 
-	if _, err = fmt.Fprint(*c, resp); err != nil {
+	// if _, err = fmt.Fprint(*c, resp); err != nil {
+	// 	logger.Println("Error writing response to connection: ", err.Error())
+	// 	os.Exit(1)
+	// }
+
+	accEnc, ok := req.GetHeader("Accept-Encoding")
+	if ok && accEnc == "gzip" {
+		resp.headers = append(resp.headers, Header{name: "Content-Encoding", value: "gzip"})
+	}
+
+	if err := resp.Write(c); err != nil {
 		logger.Println("Error writing response to connection: ", err.Error())
 		os.Exit(1)
 	}
@@ -133,12 +163,12 @@ func parseRequest(r *bufio.Reader) (Request, error) {
 	return req, nil
 }
 
-func handleRequest(req Request) (string, error) {
+func handleRequest(req Request) (Response, error) {
 	logger.Println("handling request: ", req)
 
 	routes := []struct {
 		pattern string
-		handler func(Request) (string, error)
+		handler func(Request) (Response, error)
 	}{
 		{`^\/files\/\S+$`, svc.getfile},
 		{`^\/echo\/\S+$`, svc.echo},
@@ -146,7 +176,8 @@ func handleRequest(req Request) (string, error) {
 		{`^\/$`, svc.root},
 	}
 
-	resp := ""
+	var resp Response
+	matched := false
 	for _, r := range routes {
 		ok, err := regexp.MatchString(r.pattern, req.reqLine[1])
 		fmt.Printf("%s -> %s -> %t\n", req.reqLine[1], r.pattern, ok)
@@ -155,61 +186,108 @@ func handleRequest(req Request) (string, error) {
 			continue
 		}
 		if ok {
+			matched = true
 			resp, err = r.handler(req)
 			if err != nil {
-				return "", err
+				return resp, err
 			}
 			break
 		}
 	}
 
-	if resp == "" {
-		resp = "HTTP/1.1 404 Not Found\r\n\r\n"
+	if !matched {
+		resp = Response{
+			statusCode: 404,
+			statusMsg:  "Not Found",
+			headers:    []Header{},
+			body:       "",
+		}
 	}
 
 	return resp, nil
 }
 
-func (sv *service) echo(req Request) (string, error) {
+func (sv *service) echo(req Request) (Response, error) {
 	toEcho := strings.Split(req.reqLine[1][1:], "/")[1]
-	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho), nil
+	resp := Response{
+		statusCode: 200,
+		statusMsg:  "OK",
+		headers: []Header{
+			{name: "Content-Type", value: "text/plain"},
+			{name: "Content-Length", value: fmt.Sprintf("%d", len(toEcho))},
+		},
+		body: toEcho,
+	}
+	return resp, nil
 }
 
-func (sv *service) useragent(req Request) (string, error) {
+func (sv *service) useragent(req Request) (Response, error) {
 	uagent, ok := req.GetHeader("user-agent")
 	if !ok {
-		return "", fmt.Errorf("User-Agent header not found")
+		return Response{}, fmt.Errorf("User-Agent header not found")
 	}
-	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(uagent), uagent), nil
+	resp := Response{
+		statusCode: 200,
+		statusMsg:  "OK",
+		headers: []Header{
+			{name: "Content-Type", value: "text/plain"},
+			{name: "Content-Length", value: fmt.Sprintf("%d", len(uagent))},
+		},
+		body: uagent,
+	}
+	return resp, nil
 }
 
-func (sv *service) root(req Request) (string, error) {
-	return "HTTP/1.1 200 OK\r\n\r\n", nil
+func (sv *service) root(req Request) (Response, error) {
+	resp := Response{
+		statusCode: 200,
+		statusMsg:  "OK",
+		headers:    []Header{},
+		body:       "",
+	}
+	return resp, nil
 }
 
-func (sv *service) getfile(req Request) (string, error) {
+func (sv *service) getfile(req Request) (Response, error) {
 	filename := strings.Split(req.reqLine[1][1:], "/")[1]
+	method := strings.ToUpper(req.reqLine[0])
 
-	if req.reqLine[0] == "GET" {
+	resp := Response{
+		statusCode: 200,
+		statusMsg:  "OK",
+		headers:    []Header{},
+		body:       "",
+	}
+
+	if method == "GET" {
 		dat, err := os.ReadFile(fmt.Sprintf("%s%s", sv.directory, filename))
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				return "HTTP/1.1 404 Not Found\r\n\r\n", nil
+				resp.statusCode = 404
+				resp.statusMsg = "Not Found"
+				return resp, nil
 			}
 			logger.Println("Error reading file: ", err.Error())
-			return "", err
+			return resp, err
 		}
 
 		datStr := string(dat)
-		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(datStr), datStr), nil
+		resp.headers = append(resp.headers, []Header{
+			{name: "Content-Type", value: "application/octet-stream"},
+			{name: "Content-Length", value: fmt.Sprintf("%d", len(datStr))},
+		}...)
+		resp.body = datStr
+		return resp, nil
 	}
 
-	if req.reqLine[0] == "POST" {
+	if method == "POST" {
 		if err := os.WriteFile(fmt.Sprintf("%s%s", sv.directory, filename), []byte(req.body), 0666); err != nil {
-			return "", err
+			return resp, err
 		}
-		return "HTTP/1.1 201 Created\r\n\r\n", nil
+		resp.statusCode = 201
+		resp.statusMsg = "Created"
+		return resp, nil
 	}
 
-	return "", fmt.Errorf("invalid method %v", req.reqLine[0])
+	return resp, fmt.Errorf("invalid method %v", req.reqLine[0])
 }
