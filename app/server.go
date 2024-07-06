@@ -51,7 +51,8 @@ type Response struct {
 func (rs *Response) Write(conn *net.Conn) error {
 	resp := fmt.Sprintf("HTTP/1.1 %d %s\r\n", rs.statusCode, rs.statusMsg)
 
-	for _, h := range rs.headers {
+	headers := append(rs.headers, Header{name: "Content-Length", value: fmt.Sprintf("%d", len(rs.body))})
+	for _, h := range headers {
 		resp += fmt.Sprintf("%s: %s\r\n", h.name, h.value)
 	}
 	resp += "\r\n" // End headers
@@ -214,7 +215,6 @@ func (sv *service) echo(req Request) (Response, error) {
 		statusMsg:  "OK",
 		headers: []Header{
 			{name: "Content-Type", value: "text/plain"},
-			{name: "Content-Length", value: fmt.Sprintf("%d", len(toEcho))},
 		},
 		body: toEcho,
 	}
@@ -231,7 +231,6 @@ func (sv *service) useragent(req Request) (Response, error) {
 		statusMsg:  "OK",
 		headers: []Header{
 			{name: "Content-Type", value: "text/plain"},
-			{name: "Content-Length", value: fmt.Sprintf("%d", len(uagent))},
 		},
 		body: uagent,
 	}
@@ -272,11 +271,9 @@ func (sv *service) getfile(req Request) (Response, error) {
 		}
 
 		datStr := string(dat)
-		resp.headers = append(resp.headers, []Header{
-			{name: "Content-Type", value: "application/octet-stream"},
-			{name: "Content-Length", value: fmt.Sprintf("%d", len(datStr))},
-		}...)
+		resp.headers = append(resp.headers, Header{name: "Content-Type", value: "application/octet-stream"})
 		resp.body = datStr
+
 		return resp, nil
 	}
 
@@ -286,6 +283,7 @@ func (sv *service) getfile(req Request) (Response, error) {
 		}
 		resp.statusCode = 201
 		resp.statusMsg = "Created"
+
 		return resp, nil
 	}
 
