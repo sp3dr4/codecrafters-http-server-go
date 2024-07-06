@@ -62,7 +62,10 @@ func handleConn(c *net.Conn) {
 		os.Exit(1)
 	}
 
-	resp.HandleEncoding(req)
+	if err = resp.HandleEncoding(req); err != nil {
+		logger.Println("Error handling response encoding: ", err.Error())
+		os.Exit(1)
+	}
 
 	if err := resp.Write(c); err != nil {
 		logger.Println("Error writing response to connection: ", err.Error())
