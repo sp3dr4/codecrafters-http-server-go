@@ -12,6 +12,11 @@ import (
 
 var logger = log.New(os.Stdout, "> ", log.Ldate|log.Ltime|log.Lmicroseconds)
 
+type request struct {
+	reqLine []string
+	headers []string
+}
+
 func main() {
 	l, err := net.Listen("tcp", "0.0.0.0:4221")
 	if err != nil {
@@ -19,13 +24,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := l.Accept()
-	if err != nil {
-		logger.Println("Error accepting connection: ", err.Error())
-		os.Exit(1)
-	}
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			logger.Println("Error accepting connection: ", err.Error())
+			os.Exit(1)
+		}
 
-	reader := bufio.NewReader(conn)
+		go handleConn(&conn)
+	}
+}
+
+func handleConn(c *net.Conn) {
+	reader := bufio.NewReader(*c)
 	req, err := parseRequest(reader)
 	if err != nil {
 		logger.Println("Error parsing request: ", err.Error())
@@ -38,15 +49,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if _, err = fmt.Fprint(conn, resp); err != nil {
+	if _, err = fmt.Fprint(*c, resp); err != nil {
 		logger.Println("Error writing response to connection: ", err.Error())
 		os.Exit(1)
 	}
-}
-
-type request struct {
-	reqLine []string
-	headers []string
 }
 
 func parseRequest(r *bufio.Reader) (request, error) {
